@@ -334,6 +334,85 @@ impl<T> Vec<T> {
     pub fn clear(&mut self) {
         self.raw.clear();
     }
+
+    pub fn binary_search(&self, x: &T) -> Result<usize, usize>
+    where
+        T: Ord,
+    {
+        self.binary_search_by(|p| p.cmp(x))
+    }
+
+    pub fn binary_search_by<'a, F>(&'a self, mut f: F) -> Result<usize, usize>
+    where
+        F: FnMut(&'a T) -> core::cmp::Ordering,
+    {
+        use core::cmp::Ordering;
+
+        let len = self.count();
+        if len == 0 {
+            return Err(0);
+        }
+
+        let mut base = 0usize;
+        let mut size = len;
+
+        // This loop intentionally doesn't have an early exit if the comparison
+        // returns Equal. We want the number of loop iterations to depend *only*
+        // on the size of the input slice so that the CPU can reliably predict
+        // the loop count.
+        while size > 1 {
+            let mut half = size / 2;
+            let mut mid = base + half;
+
+            // It's possible that `mid` is still being initialized by another
+            // thread.  In which case, try the element before.
+            let x = loop {
+                match self.get(mid) {
+                    Some(x) => break x,
+                    None => {
+                        mid -= 1;
+                        half -= 1;
+                    }
+                }
+            };
+            let cmp = f(x);
+
+            // TODO: Use core::intrinsics::select_unpredictable when it stabilizes
+            base = if cmp == Ordering::Greater { base } else { mid };
+
+            // This is imprecise in the case where `size` is odd and the
+            // comparison returns Greater: the mid element still gets included
+            // by `size` even though it's known to be larger than the element
+            // being searched for.
+            //
+            // This is fine though: we gain more performance by keeping the
+            // loop iteration count invariant (and thus predictable) than we
+            // lose from considering one additional element.
+            size -= half;
+        }
+
+        let x = loop {
+            match self.get(base) {
+                Some(x) => break x,
+                None => (), // Spin
+            }
+        };
+        let cmp = f(x);
+        if cmp == Ordering::Equal {
+            Ok(base)
+        } else {
+            let result = base + (cmp == Ordering::Less) as usize;
+            Err(result)
+        }
+    }
+
+    pub fn binary_search_by_key<'a, B, F>(&'a self, b: &B, mut f: F) -> Result<usize, usize>
+    where
+        F: FnMut(&'a T) -> B,
+        B: Ord,
+    {
+        self.binary_search_by(|k| f(k).cmp(b))
+    }
 }
 
 impl<T> Index<usize> for Vec<T> {
@@ -521,3 +600,16 @@ where
 }
 
 impl<T: Eq> Eq for Vec<T> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binary_search() {
+        let vec = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        for i in 0..=9 {
+            assert_eq!(vec.binary_search(&i), Ok(i));
+        }
+    }
+}
